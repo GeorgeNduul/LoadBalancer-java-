@@ -1,39 +1,53 @@
-
 package com.mycompany.loadbalancer;
 
+import java.util.*;
+import java.io.IOException;
+
 public class Main {
-    public static void main(String[] args) throws Exception {
-        int port = 8080;
-        int replicationFactor = 2;
-        long healthCheckIntervalMs = 3000;
-        long lockTryTimeoutMs = 15000;
-
-        java.util.List<FileContainer> containers = new java.util.ArrayList<>();
-        containers.add(new FileContainer("c1"));
-        containers.add(new FileContainer("c2"));
-        containers.add(new FileContainer("c3"));
-
-        // Use local package classes instead of lb.core.*
-        SchedulingAlgorithm scheduler = new MultiLevelQueues();
-        ContainerPicker picker = new RoundRobinContainerPicker();
-
+    public static void main(String[] args) {
+        // 1. Initialize core services
         UserService users = new UserService();
-        FileCatalog catalog = new FileCatalog(replicationFactor);
-        Dispatcher dispatcher = new Dispatcher(scheduler, picker, containers, catalog, lockTryTimeoutMs);
-        HealthChecker healthChecker = new HealthChecker(containers, healthCheckIntervalMs);
+        FileCatalog catalog = new FileCatalog();
+        List<FileContainer> containers = Collections.synchronizedList(new ArrayList<>());
+        Dispatcher dispatcher = new Dispatcher(catalog, containers);
 
-        dispatcher.start();
-        healthChecker.start();
+        // 2. Setup Shutdown Hook (Release ports when app stops)
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            System.out.println("\n[System] Shutting down services...");
+        }));
 
-        // Start HTTP API (local package class)
-        new HttpServerApp(users, dispatcher, catalog, containers).start(port);
+        // 3. Start MQTT Gateway (Fails gracefully if broker is offline)
+        try {
+            System.out.println("Starting MQTT Gateway...");
+            // Replace with your Host IP if necessary (e.g., 10.0.2.2 for VirtualBox)
+// To this:
+String uniqueId = "LB-Client-" + System.currentTimeMillis();
+new MqttGateway("tcp://localhost:1883", uniqueId, dispatcher, users, false);        } catch (Exception e) {
+            System.err.println("MQTT Gateway failed: " + e.getMessage());
+        }
 
-        // Start MQTT gateway
-        String brokerUrl ="tcp: 172.30.192.1";
-        boolean forwardToExternalAggregator = false;  // set true if aggregator is a separate microservice
-        new MqttGateway(brokerUrl, "lb-gateway-" + java.util.UUID.randomUUID(),
-                        dispatcher, users, forwardToExternalAggregator);
+        // 4. Start HTTP Server with Port-Failover
+        int port = 8080;
+        boolean started = false;
+        HttpServerApp httpApp = new HttpServerApp(users, dispatcher, catalog, containers);
 
-        System.out.println("LB + HTTP + MQTT ready.");
+        while (!started && port < 8090) {
+            try {
+                httpApp.start(port);
+                started = true;
+            } catch (java.net.BindException e) {
+                System.err.println("Port " + port + " is busy. Trying " + (port + 1) + "...");
+                port++;
+            } catch (IOException e) {
+                System.err.println("Critical error starting HTTP server: " + e.getMessage());
+                break;
+            }
+        }
+
+        if (started) {
+            System.out.println("LB System fully initialized and ready.");
+        } else {
+            System.err.println("Could not start HTTP server on any port in range 8080-8090.");
+        }
     }
 }

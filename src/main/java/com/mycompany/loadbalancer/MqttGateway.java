@@ -1,28 +1,22 @@
-
-// lb/integration/MqttGateway.java
 package com.mycompany.loadbalancer;
 
 import com.mycompany.loadbalancer.Dispatcher.JobEventListener;
 import org.eclipse.paho.client.mqttv3.*;
-
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.Map;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
 
 public class MqttGateway implements JobEventListener {
-    // Topics
     public static final String GUI_COMMANDS = "lb/gui/commands";
     public static final String GUI_ACKS     = "lb/gui/acks";
-    public static final String GUI_RESULTS_PREFIX = "lb/gui/results/"; // + jobId
-
-    // Optional: external aggregator topic if you want to forward requests via MQTT
+    public static final String GUI_RESULTS_PREFIX = "lb/gui/results/";
     public static final String AGGREGATOR_COMMANDS = "lb/aggregator/commands";
 
     private final MqttClient client;
     private final Dispatcher dispatcher;
     private final UserService users;
-    private final boolean forwardToExternalAggregator; // true → publish to AGGREGATOR_COMMANDS; false → submit to Dispatcher
+    private final boolean forwardToExternalAggregator;
     private final int qos = 1;
 
     public MqttGateway(String brokerUrl,
@@ -36,31 +30,45 @@ public class MqttGateway implements JobEventListener {
         this.forwardToExternalAggregator = forwardToExternalAggregator;
 
         this.client = new MqttClient(brokerUrl, clientId, new MemoryPersistence());
+        
         MqttConnectOptions opts = new MqttConnectOptions();
-        opts.setAutomaticReconnect(true);
+        opts.setAutomaticReconnect(true); 
         opts.setCleanSession(true);
-        // Last Will & Testament (optional): notify GUI that LB went offline
+        opts.setConnectionTimeout(10);
+        
         opts.setWill(GUI_ACKS, "{\"status\":\"LB_OFFLINE\"}".getBytes(StandardCharsets.UTF_8), qos, false);
 
-        client.setCallback(new MqttCallback() {
-            @Override public void connectionLost(Throwable cause) {
-                System.err.println("[MQTT] Connection lost: " + cause);
+        client.setCallback(new MqttCallbackExtended() {
+            @Override 
+            public void connectComplete(boolean reconnect, String serverURI) {
+                System.out.println("[MQTT] Connection established to " + serverURI);
+                try {
+                    client.subscribe(GUI_COMMANDS, qos);
+                    System.out.println("[MQTT] Subscribed to " + GUI_COMMANDS);
+                } catch (MqttException e) {
+                    System.err.println("[MQTT] Subscription failed: " + e.getMessage());
+                }
             }
+
+            @Override public void connectionLost(Throwable cause) {
+                if (cause != null) System.err.println("[MQTT] Connection lost: " + cause.getMessage());
+            }
+
             @Override public void messageArrived(String topic, MqttMessage message) throws Exception {
                 handleIncoming(topic, message);
             }
+
             @Override public void deliveryComplete(IMqttDeliveryToken token) {}
         });
 
-        client.connect(opts);
-
-        // Subscribe to GUI commands
-        client.subscribe(GUI_COMMANDS, qos);
-
-        // Listen to Dispatcher events
         dispatcher.addListener(this);
 
-        System.out.println("[MQTT] Connected to " + brokerUrl + ", subscribed to " + GUI_COMMANDS);
+        try {
+            System.out.println("[MQTT] Initializing connection to " + brokerUrl + "...");
+            client.connect(opts);
+        } catch (MqttException e) {
+            System.err.println("[MQTT] Broker offline. Reconnect logic active.");
+        }
     }
 
     private void handleIncoming(String topic, MqttMessage msg) {
@@ -77,11 +85,7 @@ public class MqttGateway implements JobEventListener {
 
             var u = users.auth(user, pass);
             if (u == null) {
-                publish(GUI_ACKS, Json.stringify(Map.of(
-                        "status", "UNAUTHORIZED",
-                        "user", user,
-                        "filename", filename
-                )));
+                publish(GUI_ACKS, Json.stringify(Map.of("status", "UNAUTHORIZED", "user", user != null ? user : "unknown")));
                 return;
             }
 
@@ -90,90 +94,66 @@ public class MqttGateway implements JobEventListener {
             Job job = new Job(type, u.name, filename, data, sizeKB, priority);
 
             if (forwardToExternalAggregator) {
-                // Forward to external aggregator topic (as-is or normalized)
                 publish(AGGREGATOR_COMMANDS, payload);
-                publish(GUI_ACKS, Json.stringify(Map.of(
-                        "jobId", job.id, "status", "FORWARDED", "type", type.name(), "filename", filename
-                )));
+                publish(GUI_ACKS, Json.stringify(Map.of("jobId", job.id, "status", "FORWARDED")));
             } else {
-                // Submit to in-process Dispatcher
                 dispatcher.submit(job);
-                publish(GUI_ACKS, Json.stringify(Map.of(
-                        "jobId", job.id, "status", "QUEUED", "type", type.name(), "filename", filename
-                )));
             }
-
         } catch (Exception e) {
-            System.err.println("[MQTT] Failed to process message: " + e.getMessage());
-            publish(GUI_ACKS, Json.stringify(Map.of("status", "BAD_REQUEST", "error", e.getMessage())));
+            System.err.println("[MQTT] Error: " + e.getMessage());
         }
     }
 
-    // Publish helpers
     private void publish(String topic, String payload) {
         try {
-            client.publish(topic, payload.getBytes(StandardCharsets.UTF_8), qos, false);
+            if (client != null && client.isConnected()) {
+                client.publish(topic, payload.getBytes(StandardCharsets.UTF_8), qos, false);
+            }
         } catch (MqttException e) {
-            System.err.println("[MQTT] Publish failed to " + topic + ": " + e.getMessage());
+            System.err.println("[MQTT] Publish failed: " + e.getMessage());
         }
     }
-    private void publishResult(Job job, String status, String message) {
-        String topic = GUI_RESULTS_PREFIX + job.id;
-        publish(topic, Json.stringify(Map.of(
-                "jobId", job.id,
-                "status", status,
-                "type", job.type.name(),
-                "filename", job.filename,
-                "message", message
-        )));
-    }
 
-    // Dispatcher event callbacks
     @Override public void onQueued(Job job) {
-        publish(GUI_ACKS, Json.stringify(Map.of("jobId", job.id, "status", "QUEUED", "type", job.type.name(), "filename", job.filename)));
+        publish(GUI_ACKS, Json.stringify(Map.of("jobId", job.id, "status", "QUEUED", "filename", job.filename)));
     }
-    @Override public void onStarted(Job job) { publishResult(job, "STARTED", ""); }
-    @Override public void onCompleted(Job job) { publishResult(job, "COMPLETED", ""); }
-    @Override public void onFailed(Job job, Throwable error) { publishResult(job, "FAILED", error.getMessage()); }
+    @Override public void onStarted(Job job) { 
+        publish(GUI_RESULTS_PREFIX + job.id, Json.stringify(Map.of("jobId", job.id, "status", "STARTED"))); 
+    }
+    @Override public void onCompleted(Job job) { 
+        publish(GUI_RESULTS_PREFIX + job.id, Json.stringify(Map.of("jobId", job.id, "status", "COMPLETED"))); 
+    }
+    @Override public void onFailed(Job job, Throwable error) { 
+        publish(GUI_RESULTS_PREFIX + job.id, Json.stringify(Map.of("jobId", job.id, "status", "FAILED", "error", error.getMessage()))); 
+    }
 
-    // Simple JSON helper (no external libs; minimal)
     static class Json {
-        // NOTE: For coursework, a tiny parser is OK. For production, use Jackson/Gson.
-        @SuppressWarnings("unchecked")
         static Map<String,Object> parse(String s) {
-            // Extremely simplified parser expecting flat JSON:
-            java.util.Map<String,Object> map = new java.util.LinkedHashMap<>();
+            Map<String,Object> map = new java.util.LinkedHashMap<>();
             s = s.trim();
-            if (s.startsWith("{") && s.endsWith("}")) s = s.substring(1, s.length()-1);
+            if (s.startsWith("{")) s = s.substring(1);
+            if (s.endsWith("}")) s = s.substring(0, s.length()-1);
             for (String part : s.split(",")) {
-                int i = part.indexOf(':'); if (i < 0) continue;
-                String k = part.substring(0,i).trim().replaceAll("^\"|\"$", "");
-                String v = part.substring(i+1).trim();
-                if (v.startsWith("\"")) map.put(k, v.replaceAll("^\"|\"$", ""));
-                else if ("true".equalsIgnoreCase(v) || "false".equalsIgnoreCase(v)) map.put(k, Boolean.parseBoolean(v));
-                else {
-                    try { map.put(k, Integer.parseInt(v)); }
-                    catch (Exception e) { map.put(k, v); }
-                }
+                String[] kv = part.split(":", 2);
+                if (kv.length < 2) continue;
+                String k = kv[0].trim().replace("\"", "");
+                String v = kv[1].trim().replace("\"", "");
+                map.put(k, v);
             }
             return map;
         }
         static int intOr(Object o, int def) {
-            try { return (o instanceof Number) ? ((Number)o).intValue() : Integer.parseInt(String.valueOf(o)); }
-            catch (Exception e) { return def; }
+            try { return Integer.parseInt(o.toString()); } catch (Exception e) { return def; }
         }
         static String stringify(Map<String,Object> m) {
-            StringBuilder sb = new StringBuilder("{"); boolean first = true;
-            for (Map.Entry<String,Object> e : m.entrySet()) {
-                if (!first) sb.append(','); first = false;
-                sb.append('"').append(e.getKey()).append('"').append(':').append(value(e.getValue()));
+            StringBuilder sb = new StringBuilder("{");
+            boolean first = true;
+            for (var e : m.entrySet()) {
+                if (!first) sb.append(",");
+                sb.append("\"").append(e.getKey()).append("\":\"").append(e.getValue()).append("\"");
+                first = false;
             }
-            sb.append('}'); return sb.toString();
-        }
-        static String value(Object v) {
-            if (v == null) return "null";
-            if (v instanceof Number || v instanceof Boolean) return v.toString();
-            return '"' + v.toString().replace("\"","\\\"") + '"';
+            return sb.append("}").toString();
         }
     }
 }

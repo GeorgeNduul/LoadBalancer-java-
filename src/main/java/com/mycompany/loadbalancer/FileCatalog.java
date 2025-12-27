@@ -1,43 +1,54 @@
-
 package com.mycompany.loadbalancer;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class FileCatalog {
-    private final Map<String, Set<FileContainer>> fileLocations = new HashMap<>();
-    private volatile int replicationFactor;
+    // We use a Set because Dispatcher expects unique locations for files
+    private final Map<String, Set<FileContainer>> mapping = new ConcurrentHashMap<>();
+    private int replicationFactor = 2;
 
-    public FileCatalog(int rf) { this.replicationFactor = Math.max(1, rf); }
+    public FileCatalog() {
+        // Constructor is empty and ready
+    }
 
-    public synchronized void setReplicationFactor(int rf) { this.replicationFactor = Math.max(1, rf); }
-    public int getReplicationFactor() { return replicationFactor; }
+    // Matches line 115 in Dispatcher (accepting an ArrayList but storing as Set)
+    public void place(String filename, ArrayList<FileContainer> targets) {
+        mapping.put(filename, new HashSet<>(targets));
+    }
 
-    public synchronized void place(String filename, List<FileContainer> chosen) {
-        fileLocations.put(filename, new HashSet<>(chosen));
+    // FIX for the "incompatible types" errors (Lines 119 and 139)
+    // Returns a Set instead of a List
+    public Set<FileContainer> locations(String filename) {
+        return mapping.getOrDefault(filename, Collections.emptySet());
     }
-    public synchronized Set<FileContainer> locations(String filename) {
-        return fileLocations.getOrDefault(filename, Collections.emptySet());
+
+    public boolean exists(String filename) {
+        return mapping.containsKey(filename);
     }
-    public synchronized void addReplica(String filename, FileContainer c) {
-        fileLocations.computeIfAbsent(filename, k -> new HashSet<>()).add(c);
+
+    public int getReplicationFactor() {
+        return replicationFactor;
     }
-    public synchronized void removeReplica(String filename, FileContainer c) {
-        Set<FileContainer> s = fileLocations.get(filename);
-        if (s != null) {
-            s.remove(c);
-            if (s.isEmpty()) fileLocations.remove(filename);
+
+    public void setReplicationFactor(int rf) {
+        this.replicationFactor = rf;
+    }
+
+    // Helper for removing containers
+    public Set<String> filesOn(FileContainer c) {
+        Set<String> files = new HashSet<>();
+        mapping.forEach((file, containers) -> {
+            if (containers.contains(c)) files.add(file);
+        });
+        return files;
+    }
+
+    public void removeReplica(String filename, FileContainer container) {
+        Set<FileContainer> set = mapping.get(filename);
+        if (set != null) {
+            set.remove(container);
+            if (set.isEmpty()) mapping.remove(filename);
         }
-    }
-    public synchronized boolean exists(String filename) {
-        Set<FileContainer> s = fileLocations.get(filename);
-        return s != null && !s.isEmpty();
-    }
-
-    Object allLocations() {
-        throw new UnsupportedOperationException("Not supported yet."); // Generated from nbfs://nbhost/SystemFileSystem/Templates/Classes/Code/GeneratedMethodBody
-    }
-
-    Iterable<String> filesOn(FileContainer c) {
-        throw new UnsupportedOperationException("Not supported yet."); // Generated from nbfs://nbhost/SystemFileSystem/Templates/Classes/Code/GeneratedMethodBody
     }
 }
