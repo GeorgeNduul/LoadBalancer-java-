@@ -1,16 +1,16 @@
-/*
- * Click nbfs://nbhost/SystemFileSystem/Templates/Licenses/license-default.txt to change this license
- */
-
-package com.mycompany.loadbalancer;
-
-/**
- *
- * @author ntu-user
- */
-public class LoadBalancer {
-
-    public static void main(String[] args) {
-        System.out.println("Hello World!");
-    }
-}
+///*
+// * Click nbfs://nbhost/SystemFileSystem/Templates/Licenses/license-default.txt to change this license
+// */
+//
+//package com.mycompany.loadbalancer;
+//
+///**
+// *
+// * @author ntu-user
+// */
+//public class LoadBalancer {
+//
+//    public static void main(String[] args) {
+//        System.out.println("Hello World!");
+//    }
+//}

@@ -29,7 +29,7 @@ public class Main {
         new HttpServerApp(users, dispatcher, catalog, containers).start(port);
 
         // Start MQTT gateway
-        String brokerUrl = "tcp://localhost:1883";
+        String brokerUrl ="tcp: 172.30.192.1";
         boolean forwardToExternalAggregator = false;  // set true if aggregator is a separate microservice
         new MqttGateway(brokerUrl, "lb-gateway-" + java.util.UUID.randomUUID(),
                         dispatcher, users, forwardToExternalAggregator);
